@@ -1,0 +1,205 @@
+---
+title: "Machine learning project"
+author: "T. Helmker"
+date: "27. December 2015"
+output: html_document
+---
+
+
+
+```{r workspacePreparation, echo=FALSE, message=FALSE, warning=FALSE}
+#prepare the workspace
+setwd("C:/Users/Thomas/Documents/Coursera_8_Machine_learning/")
+
+#install.packages("doParallel")
+#install.packages("rpart")
+
+require(caret)
+require(doParallel)
+require(rpart)
+
+#download the data
+# ...
+
+#load the base data into the workspace
+dat <- read.csv("./data/pml-training.csv")
+
+```
+
+#Introduction
+This report describes my way to the final prediction model for the project of the Coursera Class "Practical Machine Learning". The data to be analyzed consists of data collected by various accelerometers (159 variables) during fitness exercises and the manner how (good) an exercise was done (the prediction variable *classe*) (original source: http://groupware.les.inf.puc-rio.br/har).
+
+The report will describe
+
+1. how the data was analyzed and the relevant variables for the training were identified
+2. which model building alternatives were tested how 
+3. why the final model was chosen for following the prediction exercise 
+
+#Create training and test datasets
+
+For all following model evaluations the dataset "pml-training.csv" is divided into 60% training and 40% testing observations.  
+The model training will be done solely on the then training set to avoid overfitting. The test set will be used only for out of sample error estimation of the trained models.   
+```{r createTrainingPartition, echo=FALSE, message=FALSE}
+#Split training and validation set
+
+trainIndex = createDataPartition( y = dat$classe, p = 0.6,list=FALSE)
+training = dat[trainIndex,]
+testing = dat[-trainIndex,]
+```
+
+
+#Data exploration and condensing
+
+When building a prediction model it is always important to know which type of data (binomial, multi-level factor or continuous) has to be predicted. The prediction variable *classe* here has the type ```r class(training$classe) ``` with ```r NROW(unique(training$classe)) ``` levels.  
+
+##Near zero variance variables
+
+A cursory glance on the training dataset with the function View() showed a lot of variables that were populated (nearly) always with a single variable across the record sets. These variables with (near zero) variances are not of value for the prediction model and even detrimental to prediction quality. So they will be eliminated before proceeding with further analysis.
+
+```{r identifyNearZeroVariance, echo=FALSE, message=FALSE}
+
+#identify near zero variance predictors
+relVar <- nearZeroVar(training, saveMetrics = T)
+
+#eliminate near zero variance variables from the data frame
+training <- training[, !relVar$nzv]
+```
+This step will remove ```r  NROW(relVar[relVar$nzv,])``` variables from the observed data.  
+
+##High NA ratio variables
+
+```{r naExploration1, echo=FALSE, message=FALSE}
+#calculate percentage of NAs per column
+nav <-  sapply(colnames(training), function(x)(sum(is.na(training[, x]))  / nrow(training)))
+```
+
+Regarding the NA ratio of the remaining variables there are only ```r NROW(unique(nav)) ``` groups of variables:   ```r  unique(nav)[1]``` % and  ```r  unique(nav)[2]*100```% NAs. The latter with a very hign NA rate will be removed also before further analysis.
+```{r remove NA columns, echo=FALSE, message=FALSE}
+navExclude <- sapply(colnames(training), function(x) if(sum(is.na(training[, x])) > 0.97*nrow(training)){return(T)}else{return(F)})
+    
+training <- training[, !navExclude ]
+
+```
+
+##Content analysis
+Regarding the remaining variables compared to the original report design and data shows following issues to be investigated further:
+
+1. The imported variable "X" given in the is not present in the original data but seems to be an identifier added in the process of creating a test dataset for the class project. 
+```{r researchX, echo=FALSE, message=FALSE}
+#investigate first variable
+t1 <- as.integer(unlist(dimnames(training)[1]))
+t2 <- as.integer(training[,1])
+```
+
+A quick comparison of the column names with the content of variable *X* showed ```r identical(t1, t2)```. So that variable is removed.
+```{r filterX, echo=FALSE, message=FALSE}
+# remove rownum (variable X)
+training <- training[, -1]
+```
+
+2. The data was recorded in following setting: "ONE determined person (*user_name*) does ONE excercise in the predetermined quality of *classe* X - in a certain timeframe (*num_window*) - within this timeframe n interval measures are recorded".   The following plot shows the correlations of these predetermined test variables:  
+```{r plotCorr, echo=FALSE,fig.height=4,fig.width=4, message=FALSE}
+# show correlation of classe to time- and user info
+plot(training[,c(1,2,4,5,58)])
+```
+  
+My interpretation of the visible clusters is:  
+
+- the user_name is irrelevant - the target variable is determined by the test setup and not by user abilities
+- all time variables (window and timestamp) are irrelevant - the users had to produce the given classe in the time predetermined by the test setup and would show no improvement in time
+- conclusion: these variables can be removed also.  
+```{r filterOthers, echo=FALSE, message=FALSE}
+# remove
+training <- training[, -c(1,2,3,4,5)]
+
+#Apply reduction rules to testing
+relVar <- names(training)
+
+testing <- testing[,relVar]
+```
+
+##Final variables
+After applying of all filters ```r NCOL(training) ``` variables are left:  ```r NCOL(training) - 1 ```potential predictor variables and 1 outcome variable for further analysis.
+
+
+#Starting with the models
+I will try three different algorhythms appropriate for categorical variables to create a prediction model, report the in sample accuracy on the training data and the estimated out-of-error rate of the model based on the prediction accuracy on the test data.  
+
+##Tree prediction
+```{r treeForest, cache=TRUE, message=FALSE}
+modRpart <- train(classe ~ .,method="rpart",data=training)
+# extract accuracy from final model
+tRp <- modRpart[4]
+accuracyRpart <- cbind(c("Rpart (rpart)") , round(max(tRp[[1:2]]),3))
+# evaluating prediction accuracy on the test dataset
+predRpart <- predict(modRpart, testing) 
+testing$predRightRpart <- predRpart==testing$classe
+# calculate out-of-sample error
+accRpart <- cbind(accuracyRpart, round(1 - mean(predRpart == testing$classe),3))
+```
+
+The predictive quality (accuracy) of a ```r  (accuracyRpart[1]) ``` approach on the training set is ```r  as.numeric(accuracyRpart[2]) ```. The estimated out-of-sample error (based on the prediction on the test set) is ```r  as.numeric(accRpart[3]) ```. 
+
+### Random forests
+```{r randomForest, cache=TRUE, message=FALSE}
+#Activate parallel computing
+cl <- makeCluster(4); registerDoParallel(cl)
+# the computational requirements of default method "bootstrap" are too high for my # computer => apply cross-validation to avoid blue screen
+modRf <- train(classe~ .,data=training,
+                 method="rf", 
+               trControl = trainControl(method = "cv", number = 4) ,
+               prox=TRUE)
+stopCluster(cl)
+# extract accuracy info from final random forest model
+tRf <- modRf[4]
+accuracyRf <- cbind(c("Random Forest (rf)") , round(max(tRf[[1:2]]),3))
+# evaluating prediction accuracy on the test dataset
+predRf <- predict(modRf, testing) 
+testing$predRightRf <- predRf ==testing$classe
+# calculate out-of-sample error
+accRf <- cbind(accuracyRf, round((1 - mean (predRf == testing$classe)),3))
+```
+
+The predictive quality (accuracy) of a ```r  (accuracyRf[1]) ``` approach on the training set is ```r  as.numeric(accuracyRf[2]) ```.  The estimated out-of-sample error (based on the prediction on the test set) is ```r  as.numeric(accRf[3]) ```. 
+
+
+###Boosting model
+```{r boostingModel, cache=TRUE, message=FALSE}
+#Activate parallel computing
+cl <- makeCluster(detectCores()); registerDoParallel(cl)
+modBoost <- train(classe ~ ., 
+                  method = "gbm", 
+                  data = training, verbose = F,
+                  trControl = trainControl(method = "cv", number = 10))
+stopCluster(cl)
+# extract accuracy info from final gbm model
+t <- as.data.frame(modBoost[4])
+accuracyBoost <- cbind(c("Boost (gbm)") , round(max(t$results.Accuracy),3))
+#evaluating prediction accuracy on test dataset
+predBoost <- predict(modBoost, testing); 
+testing$predRightBoost <- predBoost ==testing$classe
+# calculate out-of-sample error
+accBoost <- cbind(accuracyBoost, round((1 - mean (predBoost == testing$classe)),3))
+```
+The predictive quality (accuracy) of a ```r  (accuracyBoost[1]) ``` approach on the training set is ```r  as.numeric(accuracyBoost[2]) ```.  The estimated out-of-sample error (based on the prediction on the test set) is ```r  as.numeric(accBoost[3]) ```. 
+
+#Out of sample errors and choices
+
+A comparison of the three models concerning accuracy on the training data and estimated out-of-sample error shows that the random forest model has the highest accuracy on the training set as well as the lowest estimated out of sample error.
+```{r ComparisonTable, dependson="treeForest", dependson="randomForest", dependson="boostingModel", cache=TRUE, echo=FALSE, results='asis', message=FALSE}
+## 
+comp <- NULL
+comp <- as.data.frame(rbind(accBoost, accRf, accRpart))
+names(comp) <- c("Method","In sample accuracy","Est. out-of-sample Error")
+    
+require(xtable) 
+library(xtable); options(xtable.floating = FALSE)
+options(xtable.type = 'html')
+## print the results
+xtable(comp)
+```
+
+Therefore the random forest model will be used as the predictive model for the course project part 2.  
+  
+    
+    
